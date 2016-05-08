@@ -360,7 +360,12 @@ def onLocation(evt) {
     
     def lstDomoticz = []
     def body = new String(hMap.body.decodeBase64())
-    def statusrsp = new JsonSlurper().parseText(body)
+    
+    try {
+    	def statusrsp = new JsonSlurper().parseText(body)
+    } catch (e) {
+        log.info("onLocation failed to parse Domoticz message - (${body})")
+    }
     
     statusrsp = statusrsp.result
 	statusrsp.each 
