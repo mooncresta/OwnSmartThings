@@ -350,23 +350,28 @@ private def setupListDevices() {
 def onLocation(evt) {
 	log.info "onLocation evt.source ${evt.source}"
 
+	TRACE("location event description is (${evt.description})")
+    
     def description = evt.description
     def hMap = stringToMap(description)
     try {
         def header = new String(hMap.headers.decodeBase64())
+        TRACE("location event header is (${header})")
     } catch (e) {
         return
     }
     
     def lstDomoticz = []
     def body = new String(hMap.body.decodeBase64())
-    
+    TRACE("location event body is (${body})")
+
     try {
     	def statusrsp = new JsonSlurper().parseText(body)
     } catch (e) {
         log.info("onLocation failed to parse Domoticz message - (${body})")
     }
     
+    TRACE("statusrsp is (${statusrsp})")
     statusrsp = statusrsp.result
 	statusrsp.each 
     	{ 
