@@ -23,11 +23,8 @@ definition(
     description: "Connects to local Domoticz server and define Domoticz devices in ST",
     category: "My Apps",
     iconUrl: "http://www.thermosmart.nl/wp-content/uploads/2015/09/domoticz-450x450.png",
-//        iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
-
     iconX2Url: "http://www.thermosmart.nl/wp-content/uploads/2015/09/domoticz-450x450.png",
-    //iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png",
-    iconX3Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png"
+    iconX3Url: "http://www.thermosmart.nl/wp-content/uploads/2015/09/domoticz-450x450.png"
 )
 /*-----------------------------------------------------------------------------------------*/
 /*		PREFERENCES      
@@ -258,6 +255,8 @@ private def setupTestConnection() {
 private def setupActionTest() {
     TRACE("setupActionTest()")
 
+	updateDeviceList()
+
     def pageProperties = [
         name        : "setupActionTest",
         title       : "Adding Devices",
@@ -303,7 +302,7 @@ def uninstalled() {
     TRACE("uninstalled()")
 
     // delete all child devices
-    def devices = getChildDevices(true)
+    def devices = getChildDevices()
     devices?.each {
         try {
             deleteChildDevice(it.deviceNetworkId)
@@ -317,7 +316,7 @@ def uninstalled() {
 /*-----------------------------------------------------------------------------------------*/
 private def setupListDevices() {
     TRACE("setupListDevices()")
-
+	updateDeviceList()
     def textNoDevices =
         "You have not configured any Domoticz devices yet. Tap Next to continue."
 
@@ -348,34 +347,24 @@ private def setupListDevices() {
 /*		Handle the location events that are being triggered from sendHubCommand
 /*-----------------------------------------------------------------------------------------*/
 def onLocation(evt) {
-	log.info "onLocation evt.source ${evt.source}"
+	log.info "evt.source ${evt.source}"
 
-	TRACE("location event description is (${evt.description})")
-    
     def description = evt.description
     def hMap = stringToMap(description)
     try {
         def header = new String(hMap.headers.decodeBase64())
-        TRACE("location event header is (${header})")
     } catch (e) {
         return
     }
     
     def lstDomoticz = []
     def body = new String(hMap.body.decodeBase64())
-    TRACE("location event body is (${body})")
-
-    try {
-    	def statusrsp = new JsonSlurper().parseText(body)
-    } catch (e) {
-        log.info("onLocation failed to parse Domoticz message - (${body})")
-    }
+    def statusrsp = new JsonSlurper().parseText(body)
     
-    TRACE("statusrsp is (${statusrsp})")
     statusrsp = statusrsp.result
 	statusrsp.each 
     	{ 
-        	log.info("onLocation Before addswitch ${it.SwitchType} ${it.Name} ${it.Status}")
+        	log.info("${it.SwitchType} ${it.Name} ${it.Status}")
             if (it.SwitchType == domoticzProtocol || domoticzProtocol == "ALL") 
             {
                 lstDomoticz.add(it.Name)
@@ -383,15 +372,19 @@ def onLocation(evt) {
                 case "Blinds":
                 	addSwitch(it.idx, "domoticzBlinds", it.Name, it.Status)
                     break;
+                case "Blinds Inverted":
+                	addSwitch(it.idx, "domoticzBlinds", it.Name, it.Status)
+                    break;
+                case "Blinds Percentage":
+                	addSwitch(it.idx, "domoticzBlinds", it.Name, it.Status)
+                    break;
                 case "On/Off":
-                    TRACE("On-Off addSwitch IDX (${it.idx}), Name (${it.name})")
+                    addSwitch(it.idx, "domoticzOnOff", it.Name, it.Status)
+                    break;
+                case "Dimmer":
                     addSwitch(it.idx, "domoticzOnOff", it.Name, it.Status)
                     break;
                 }
-            }
-            else 
-            {
-               TRACE("Not adding switch type (${it.SwitchType}), IDX (${it.idx}), Name (${it.name})")
             }
     	}
 
@@ -430,15 +423,22 @@ private def initialize() {
 /*		Execute the real add or status update of the child device
 /*-----------------------------------------------------------------------------------------*/
 private def addSwitch(addr, passedFile, passedName, passedStatus) {
-    TRACE("Main addSwitch(${addr})")
+    TRACE("addSwitch(${addr})")
 
     def dni = settings.domoticzIpAddress + ":" + settings.domoticzTcpPort + ":" + addr
     
-    /*	the device already exists */
+    /*	the device already exists old style DNI */
     if (getChildDevice(dni)) {
-        TRACE("Main addSwitch(${addr}) DNI (${dni}) already exists")
        	return 
     }
+	
+    dni = app.id + "-IDX:" + addr
+	
+/*	the device already exists new style DNI */
+     if (getChildDevice(dni)) {
+       	return 
+    }
+
 
     def devFile = passedFile
     def devParams = [
@@ -454,7 +454,6 @@ private def addSwitch(addr, passedFile, passedName, passedStatus) {
     try {
         def dev = addChildDevice("verbem", devFile, dni, location.hubs[0].id, devParams)
         dev.refresh()
-          TRACE("addChildDevice(${addr}) success")
     } catch (e) {
         log.error "Cannot create child device. Error: ${e}"
         return 
@@ -483,15 +482,19 @@ private def updateDeviceList() {
      
     try {
         state.devices.each { k,v ->
+        	TRACE("Checking for possible deleted device ${v.dni} in state ${k}")
             if (!getChildDevice(v.dni)) {
-                TRACE("Removing deleted device ${v.dni}")
+                TRACE("Removing deleted device ${v.dni} for state ${k}")
                 state.devices.remove(k)
+            }
+            else {
+            	TRACE("Checked child device ${d}")
             }
         }
     } catch (e) {TRACE(e)}
 
     // refresh all devices
-    def devices = getChildDevices(true)
+    def devices = getChildDevices()
     devices?.each {
         it.refresh()
     }
@@ -512,13 +515,11 @@ private def getDeviceMap() {
 
 private def getDeviceListAsText(type) {
     String s = ""
-    state.devices.each { k,v ->
-        TRACE("List dev - ${v}")
-		if (v.type == type) {
+    state.devices.sort().each { k,v ->
+        if (v.type == type) {
             def dev = getChildDevice(v.dni)
             if (dev) {
                 s += "${k.padLeft(4)} - ${dev.displayName}\n"
-                TRACE("List string - ${s}")
             }
         }
     }
@@ -614,7 +615,7 @@ private def socketSend(message, addr, level) {
     def rooLog = ""
     TRACE("IDX = ${addr}") 
     
-	switch (message) {
+    switch (message) {
 		case "list":
         	rooLog = "/json.htm?type=command&param=addlogmessage&message=SmartThings%20ListDevices"
         	rooPath = "/json.htm?type=devices&filter=light&used=true&order=Name"
@@ -645,12 +646,6 @@ private def socketSend(message, addr, level) {
             break;
 	}
     
-    def hubActionLog = new physicalgraph.device.HubAction(
-        method: "GET",
-        path: rooLog,
-        headers: [HOST: "${domoticzIpAddress}:${domoticzTcpPort}"])
-
-    sendHubCommand(hubActionLog)
 	
     def hubAction = new physicalgraph.device.HubAction(
         method: "GET",
@@ -659,6 +654,14 @@ private def socketSend(message, addr, level) {
 
     sendHubCommand(hubAction)
 	
+ /*       def hubActionLog = new physicalgraph.device.HubAction(
+        method: "GET",
+        path: rooLog,
+        headers: [HOST: "${domoticzIpAddress}:${domoticzTcpPort}"])
+
+    sendHubCommand(hubActionLog)
+*/
+    
 }
 /*-----------------------------------------------------------------------------------------*/
 /*		Domoticz will send an event message to ST for all devices THAT HAVE BEEN SELECTED to do that
@@ -670,16 +673,16 @@ def eventDomoticz() {
         def devName = parts[0]
         def devStatus = parts[1]
         def children = getChildDevices()
-		
-        children.each { 
-            TRACE(it.name)
+
+		children.each { 
+            //TRACE(it.name)
             if (it.name == devName) {
                TRACE(it.typeName + "/" + devName + " changed to " + devStatus)
                switch (it.typeName) {
                     case "domoticzBlinds":
-                        it.generateEvent("status":devStatus)
+                    	if (devStatus == "OFF") {it.generateEvent("status":"Open")}
+                        if (devStatus == "ON") {it.generateEvent("status":"Closed")}
                     	break;
-
                     case "domoticzOnOff":
                         it.generateEvent("switch":devStatus)
 	                    break;
@@ -690,7 +693,7 @@ def eventDomoticz() {
     return null
 }
 /*-----------------------------------------------------------------------------------------*/
-/*		get the access token. It will be displayed in the log/IDE. Plug this the Domoticz notification Settings access_token
+/*		get the access token. It will be displayed in the log/IDE. Plug this in the Domoticz Notification Settings access_token
 /*-----------------------------------------------------------------------------------------*/
 private def initRestApi() {
 		TRACE("initRestApi")
