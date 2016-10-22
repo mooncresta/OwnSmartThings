@@ -12,6 +12,7 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
+ * SW Debug version 0.1
  */
  
 import groovy.json.*
@@ -36,6 +37,8 @@ preferences {
     page name:"setupListDevices"
     page name:"setupTestConnection"
     page name:"setupActionTest"
+    page name:"resetSettings"
+
 }
 /*-----------------------------------------------------------------------------------------*/
 /*		Mappings for REST ENDPOINT to communicate events from Domoticz      
@@ -71,16 +74,31 @@ private def setupInit() {
         initRestApi()
     }
     if (state.setup) {
-        // already initialized, go to setup menu
+        TRACE("Already initialized, go to setup menu")
         return setupMenu()
     }
-    /* 		Initialize app state and show welcome page */
+    TRACE("Initialize app state and show welcome page")
     state.setup = [:]
     state.setup.installed = false
     state.devices = [:]
     
     return setupWelcome()
 }
+/*-----------------------------------------------------------------------------------------*/
+/*		Reset SmartAppSettings
+/*      SW
+/*-----------------------------------------------------------------------------------------*/
+private def resetSettings() {
+    TRACE("Reset Settings - Initialize app state and show welcome page")
+    deleteChilds()
+    
+    state.setup = [:]
+    state.setup.installed = false
+    state.devices = [:]
+    return setupWelcome()
+ 
+}
+
 /*-----------------------------------------------------------------------------------------*/
 /*		SET Up Welcome PAGE
 /*-----------------------------------------------------------------------------------------*/
@@ -159,6 +177,8 @@ private def setupMenu() {
             if (state.devices.size() > 0) {
                 href "setupListDevices", title:"List Installed Devices", description:"Tap to open"
             }
+            href "resetSettings", title:"Reset Settings", description:"Tap to reset"
+
         }
         section([title:"Options", mobileOnly:true]) {
             label title:"Assign a name", required:false
@@ -199,6 +219,13 @@ private def setupDomoticz() {
         options	    : ["ALL", "Blinds", "On/Off"],
         defaultValue: "ALL"
     ]
+    def inputDelay = [
+        name        : "domoticzDelay",
+        type        : "enum",
+        title       : "Milliseconds delay after SendHubCommand",
+        options	    : [0, 500, 1000, 1500, 2000, 2500, 3000],
+        defaultValue: 0
+    ]
 
     def inputTrace = [
         name        : "domoticzTrace",
@@ -221,6 +248,7 @@ private def setupDomoticz() {
             input inputTcpPort
 	        input inputProtocol
             input inputTrace
+            input inputDelay
         	}
     }
 }
@@ -267,8 +295,8 @@ private def setupActionTest() {
 
     
     def networkId = makeNetworkId(settings.domoticzIpAddress, settings.domoticzTcpPort)
-    
-	socketSend("list", 0, 0)
+
+	socketSend("list", 0, 0, 0, 0)
 
     return dynamicPage(pageProperties) {
         section {
@@ -300,6 +328,23 @@ def updated() {
 /*-----------------------------------------------------------------------------------------*/
 def uninstalled() {
     TRACE("uninstalled()")
+
+    // delete all child devices
+    def devices = getChildDevices()
+    devices?.each {
+        try {
+            deleteChildDevice(it.deviceNetworkId)
+        } catch (e) {
+            log.error "Cannot delete device ${it.deviceNetworkId}. Error: ${e}"
+        }
+    }
+}
+
+/*-----------------------------------------------------------------------------------------*/
+/*		Debugging DeleteChilds command
+/*-----------------------------------------------------------------------------------------*/
+def deleteChilds() {
+    TRACE("deleteChilds()")
 
     // delete all child devices
     def devices = getChildDevices()
@@ -347,11 +392,14 @@ private def setupListDevices() {
 /*		Handle the location events that are being triggered from sendHubCommand
 /*-----------------------------------------------------------------------------------------*/
 def onLocation(evt) {
-	log.info "evt.source ${evt.source}"
+	log.info "onLocation evt.source ${evt.source}"
 
     def description = evt.description
+    log.info "evt.description ${evt.description}"
+    
     def hMap = stringToMap(description)
-    try {
+
+	try {
         def header = new String(hMap.headers.decodeBase64())
     } catch (e) {
         return
@@ -362,9 +410,15 @@ def onLocation(evt) {
     def statusrsp = new JsonSlurper().parseText(body)
     
     statusrsp = statusrsp.result
+//    log.info("${statusrsp}")
+    
+    if (state.setStatusrsp == true ) {state.statusrsp = statusrsp}
+    state.setStatusrsp = false
 	statusrsp.each 
     	{ 
-        	log.info("${it.SwitchType} ${it.Name} ${it.Status}")
+        	log.info("Location event for ${it.SwitchType} ${it.Name} ${it.Status}")
+            log.info("Line is ${it}")
+
             if (it.SwitchType == domoticzProtocol || domoticzProtocol == "ALL") 
             {
                 lstDomoticz.add(it.Name)
@@ -412,7 +466,8 @@ private def initialize() {
         log.info url
         state.urlCustomActionHttp = url
 	}
-
+    
+	state.setStatusrsp = false
     state.setup.installed = true
     state.networkId = settings.domoticzIpAddress + ":" + settings.domoticzTcpPort
     updateDeviceList()
@@ -423,20 +478,38 @@ private def initialize() {
 /*		Execute the real add or status update of the child device
 /*-----------------------------------------------------------------------------------------*/
 private def addSwitch(addr, passedFile, passedName, passedStatus) {
-    TRACE("addSwitch(${addr})")
+    TRACE("addSwitch Start(${addr}), (${passedFile}), (${passedName}), (${passedStatus})")
 
     def dni = settings.domoticzIpAddress + ":" + settings.domoticzTcpPort + ":" + addr
     
+    def childdev = getChildDevice(dni)
+    
+    TRACE("addSwitch child 1 (${dni}), childdev is (${childdev})")
+    
     /*	the device already exists old style DNI */
-    if (getChildDevice(dni)) {
+    if (childdev) {
+    	TRACE("addSwitch(${dni}) old style dni already exists Returning")
+        if (state.devices[addr] == null) {
+            TRACE("addSwitch(${dni}) old style dni not in state - deleting childdevice")
+        	}
        	return 
+     } else {
+         	TRACE("addSwitch(${dni}) old style dni doesnt exist")
     }
 	
-    dni = app.id + "-IDX:" + addr
-	
+    dni = app.id + ":IDX:" + addr
+	childdev = getChildDevice(dni)
+    TRACE("addSwitch child 2 (${dni}), childdev is (${childdev})")
+
 /*	the device already exists new style DNI */
-     if (getChildDevice(dni)) {
+     if (childdev) {
+    	TRACE("addSwitch(${dni}) new style dni already exists Returning")
+        if (state.devices[addr] == null) {
+            TRACE("addSwitch(${dni}) new style dni not in state - deleting childdevice")
+        	}
        	return 
+     } else {
+         	TRACE("addSwitch(${dni}) new style dni doesnt exist")
     }
 
 
@@ -452,8 +525,8 @@ private def addSwitch(addr, passedFile, passedName, passedStatus) {
 
     TRACE("Creating child device ${devParams}")
     try {
-        def dev = addChildDevice("verbem", devFile, dni, location.hubs[0].id, devParams)
-        dev.refresh()
+        def dev = addChildDevice("verbem", devFile, dni, getHubID(), devParams)
+        //dev.refresh()
     } catch (e) {
         log.error "Cannot create child device. Error: ${e}"
         return 
@@ -473,35 +546,42 @@ private def addSwitch(addr, passedFile, passedName, passedStatus) {
     return 
 }
 /*-----------------------------------------------------------------------------------------*/
-/*		Purge devices that were removed manually
+/*		Purge devices that were removed from Domoticz
 /*-----------------------------------------------------------------------------------------*/
 private def updateDeviceList() {
     TRACE("updateDeviceList()")
 
     /* avoid ConcurrentModificationException that will happen */
-     
-    try {
-        state.devices.each { k,v ->
-        	TRACE("Checking for possible deleted device ${v.dni} in state ${k}")
-            if (!getChildDevice(v.dni)) {
-                TRACE("Removing deleted device ${v.dni} for state ${k}")
-                state.devices.remove(k)
-            }
-            else {
-            	TRACE("Checked child device ${d}")
-            }
-        }
-    } catch (e) {TRACE(e)}
+    def whichDevices = new ArrayList()
 
-    // refresh all devices
-    def devices = getChildDevices()
-    devices?.each {
-        it.refresh()
+    state.devices.each { k,v ->
+        def inStatusrsp = false
+        state.statusrsp.each {
+        	TRACE("K is ${k} , v is ${v} it.ix is ${it.idx}")
+        	if (k == it.idx) { inStatusrsp = true}
+        }
+            
+        if (inStatusrsp == false ) {
+        	TRACE("${k} not in Domoticz anymore")
+            whichDevices.add(k)
+            TRACE("Removing deleted device ${v.dni} from state and from childDevices ${k}")
+            try {
+            	deleteChildDevice(v.dni)
+            } 	catch (e) {
+            	log.error "Cannot delete device ${v.dni}. Error: ${e}"
+            }
+
+        }
     }
     
+	whichDevices.each { k ->
+    	state.devices.remove(k)
+    }
 }
 
 private def getDeviceMap() {
+    TRACE("getDeviceMap()")
+
     def devices = [:]
     state.devices.each { k,v ->
         if (!devices.containsKey(v.type)) {
@@ -514,18 +594,21 @@ private def getDeviceMap() {
 }
 
 private def getDeviceListAsText(type) {
+    TRACE("getDeviceListAsText()")
+
     String s = ""
     state.devices.sort().each { k,v ->
         if (v.type == type) {
             def dev = getChildDevice(v.dni)
             if (dev) {
-                s += "${k.padLeft(4)} - ${dev.displayName}\n"
+           	   s += "${k.padLeft(4)} - ${dev.displayName} - ${v.dni}\n"
+               }			
             }
-        }
     }
 
     return s
-}
+} 
+
 
 // Returns device Network ID in 'AAAAAAAA:PPPP' format
 private String makeNetworkId(ipaddr, port) {
@@ -564,7 +647,7 @@ private def STATE() {
 /*-----------------------------------------------------------------------------------------*/
 def domoticz_poll(nid) {
 	TRACE("domoticz poll(${nid})")
-    socketSend("status", nid, 0)
+    socketSend("status", nid, 0, 0, 0)
 }
 
 /*-----------------------------------------------------------------------------------------*/
@@ -572,14 +655,14 @@ def domoticz_poll(nid) {
 /*-----------------------------------------------------------------------------------------*/
 def domoticz_off(nid) {
 	TRACE("domoticz off(${nid})")
-    socketSend("off", nid, 0)
+    socketSend("off", nid, 0, 0, 0)
 }
 /*-----------------------------------------------------------------------------------------*/
 /*		Excecute 'on' command on behalf of child device
 /*-----------------------------------------------------------------------------------------*/
 def domoticz_on(nid) {
 	TRACE("domoticz on(${nid})")
-    socketSend("on", nid, 16)
+    socketSend("on", nid, 16, 0, 0)
 }
 
 /*-----------------------------------------------------------------------------------------*/
@@ -587,7 +670,7 @@ def domoticz_on(nid) {
 /*-----------------------------------------------------------------------------------------*/
 def domoticz_toggle(nid) {
 	TRACE("domoticz toggle(${nid})")
-    socketSend("toggle", nid, 16)
+    socketSend("toggle", nid, 16, 0, 0)
 }
 
 /*-----------------------------------------------------------------------------------------*/
@@ -595,7 +678,7 @@ def domoticz_toggle(nid) {
 /*-----------------------------------------------------------------------------------------*/
 def domoticz_stop(nid) {
 	TRACE("domoticz stop(${nid})")
-    socketSend("stop", nid, 0)
+    socketSend("stop", nid, 0, 0, 0)
 }
 
 /*-----------------------------------------------------------------------------------------*/
@@ -603,22 +686,35 @@ def domoticz_stop(nid) {
 /*-----------------------------------------------------------------------------------------*/
 def domoticz_setlevel(nid, xLevel) {
 	TRACE("domoticz setlevel(${nid})")
-    if (xLevel.toInteger() == 0) {socketSend("off", nid, 0)}
-    else {socketSend("on", nid, xLevel)}
+    if (xLevel.toInteger() == 0) {socketSend("off", nid, 0, 0, 0)}
+    else {socketSend("on", nid, xLevel, 0, 0)}
+}
+
+/*-----------------------------------------------------------------------------------------*/
+/*		Excecute 'setlevel' command on behalf of child device 
+/*-----------------------------------------------------------------------------------------*/
+def domoticz_setcolor(nid, xHue, xBri, xSat) {
+	TRACE("domoticz setlevel(${nid})")
+    socketSend("setcolor", nid, xHue, xSat, xBri)
+
 }
 
 /*-----------------------------------------------------------------------------------------*/
 /*		Excecute The real request via the local HUB
 /*-----------------------------------------------------------------------------------------*/
-private def socketSend(message, addr, level) {
+private def socketSend(message, addr, level, xSat, xBri) {
 	def rooPath = ""
     def rooLog = ""
-    TRACE("IDX = ${addr}") 
-    
+    TRACE("SENDING IDX = ${addr}") 
+    TRACE("SENDING IDX = ${message}") 
+
     switch (message) {
 		case "list":
+        	state.setStatusrsp = true
         	rooLog = "/json.htm?type=command&param=addlogmessage&message=SmartThings%20ListDevices"
-        	rooPath = "/json.htm?type=devices&filter=light&used=true&order=Name"
+/**        	rooPath = "/json.htm?type=devices&filter=light&used=true&order=Name" **/
+            rooPath = "/json.htm?type=devices&filter=all&used=true&order=Name"
+
  			break;
 		case "status":
         	rooLog = "/json.htm?type=command&param=addlogmessage&message=SmartThings%20Status%20for%20${addr}"
@@ -644,6 +740,11 @@ private def socketSend(message, addr, level) {
         	rooLog = "/json.htm?type=command&param=addlogmessage&message=SmartThings%20Level%20${level}%20for%20${addr}"
         	rooPath = "/json.htm?type=command&param=switchlight&idx=${addr}&switchcmd=On,level=${level}"
             break;
+        case "setcolor":
+        	rooLog = "/json.htm?type=command&param=addlogmessage&message=SmartThings%20Color%20${level}%20for%20${addr}"
+        	rooPath = "/json.htm?type=command&param=setcolbrightnessvalue&idx=${addr}&hue=${level}&brightness=${xBri}&iswhite=false"
+            break;
+            
 	}
     
 	
@@ -652,22 +753,29 @@ private def socketSend(message, addr, level) {
         path: rooPath,
         headers: [HOST: "${domoticzIpAddress}:${domoticzTcpPort}"])
 
+	try {
+	    Long mSeconds = settings.domoticzDelay.toInteger()
+	 } 	catch (e) {
+     	Long mSeconds =  0
+     }
+
+//pause(mSeconds)
     sendHubCommand(hubAction)
 	
- /*       def hubActionLog = new physicalgraph.device.HubAction(
+    /*hubActionLog = new physicalgraph.device.HubAction(
         method: "GET",
         path: rooLog,
         headers: [HOST: "${domoticzIpAddress}:${domoticzTcpPort}"])
-
-    sendHubCommand(hubActionLog)
-*/
-    
+	pause(mSeconds) 
+    sendHubCommand(hubActionLog) */
+	
+    return null
 }
 /*-----------------------------------------------------------------------------------------*/
 /*		Domoticz will send an event message to ST for all devices THAT HAVE BEEN SELECTED to do that
 /*-----------------------------------------------------------------------------------------*/
 def eventDomoticz() {
-	TRACE("eventDomoticz" + params)
+	TRACE("eventDomoticz " + params)
     if (params.message.contains(" >> ")) {
         def parts = params.message.split(" >> ")
         def devName = parts[0]
@@ -680,8 +788,9 @@ def eventDomoticz() {
                TRACE(it.typeName + "/" + devName + " changed to " + devStatus)
                switch (it.typeName) {
                     case "domoticzBlinds":
-                    	if (devStatus == "OFF") {it.generateEvent("status":"Open")}
-                        if (devStatus == "ON") {it.generateEvent("status":"Closed")}
+                    	if (devStatus == "OFF") {it.generateEvent("status":"Up")}
+                        if (devStatus == "ON") {it.generateEvent("status":"Down")}
+                        if (devStatus == "STOP") {it.generateEvent("status":"Stop")}
                     	break;
                     case "domoticzOnOff":
                         it.generateEvent("switch":devStatus)
@@ -692,6 +801,7 @@ def eventDomoticz() {
     }
     return null
 }
+
 /*-----------------------------------------------------------------------------------------*/
 /*		get the access token. It will be displayed in the log/IDE. Plug this in the Domoticz Notification Settings access_token
 /*-----------------------------------------------------------------------------------------*/
@@ -707,3 +817,12 @@ private def initRestApi() {
 
 }
 //-----------------------------------------------------------
+
+def getHubID(){
+    def hubID
+    def hubs = location.hubs.findAll{ it.type == physicalgraph.device.HubType.PHYSICAL } 
+    log.debug "hub count: ${hubs.size()}"
+    if (hubs.size() == 1) hubID = hubs[0].id 
+    log.debug "hubID: ${hubID}"
+    return hubID
+}
